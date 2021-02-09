@@ -1,0 +1,9 @@
+[mysqld]
+# commit毎のログへの書き込み量
+innodb_flush_log_at_trx_commit = 0
+# デフォルトだとInnoDB にすべてのデータが2回書き込まれる
+innodb_doublewrite = 0
+# メモリにロードされるデータとインデックスのために使うメモリ量
+innodb_buffer_pool_size = 2560M
+# 各テーブルのデータおよびインデックスがシステムテーブルスペースではなく、個別の .ibd ファイルに格納される
+innodb_file_per_table = ON

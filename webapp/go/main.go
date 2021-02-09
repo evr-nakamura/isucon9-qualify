@@ -21,6 +21,9 @@ import (
 	goji "goji.io"
 	"goji.io/pat"
 	"golang.org/x/crypto/bcrypt"
+
+	_ "net/http/pprof"
+	"sync"
 )
 
 const (
@@ -195,7 +198,7 @@ type resUserItems struct {
 
 type resTransactions struct {
 	HasNext bool         `json:"has_next"`
-	Items   []ItemDetail `json:"items"`
+	Items   []*ItemDetail `json:"items"`
 }
 
 type reqRegister struct {
@@ -268,6 +271,46 @@ type resSetting struct {
 	Categories        []Category `json:"categories"`
 }
 
+var (
+	config = map[string]string{
+		"payment_service_url":  DefaultPaymentServiceURL,
+		"shipment_service_url": DefaultShipmentServiceURL,
+	}
+	allCategories = make([]Category, 0)
+	categoryByID = make(map[int]Category)
+	childCategories = make(map[int][]int)
+)
+
+func loadCategories() {
+	err := dbx.Select(&allCategories, "SELECT * FROM categories")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	categoryByID = make(map[int]Category, len(allCategories))
+	childCategories = make(map[int][]int)
+	for _, c := range allCategories {
+		categoryByID[c.ID] = c
+	}
+
+	for _, c := range categoryByID {
+		if c.ParentID > 0 {
+			c.ParentCategoryName = categoryByID[c.ParentID].CategoryName
+		}
+		categoryByID[c.ID] = c
+
+		var children []int
+		for _, child := range categoryByID {
+			if child.ParentID == c.ID {
+				children = append(children, child.ID)
+			}
+		}
+		if len(children) > 0 {
+			childCategories[c.ID] = children
+		}
+	}
+}
+
 func init() {
 	store = sessions.NewCookieStore([]byte("abc"))
 
@@ -279,6 +322,10 @@ func init() {
 }
 
 func main() {
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
+
 	host := os.Getenv("MYSQL_HOST")
 	if host == "" {
 		host = "127.0.0.1"
@@ -317,6 +364,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("failed to connect to DB: %s.", err.Error())
 	}
+	dbx.SetConnMaxLifetime(100 * time.Second)
+	dbx.SetMaxIdleConns(100)
+	dbx.SetMaxOpenConns(100)
 	defer dbx.Close()
 
 	mux := goji.NewMux()
@@ -408,28 +458,43 @@ func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err
 }
 
 func getCategoryByID(q sqlx.Queryer, categoryID int) (category Category, err error) {
-	err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
-	if category.ParentID != 0 {
-		parentCategory, err := getCategoryByID(q, category.ParentID)
-		if err != nil {
-			return category, err
-		}
-		category.ParentCategoryName = parentCategory.CategoryName
+	// err = sqlx.Get(q, &category, "SELECT * FROM `categories` WHERE `id` = ?", categoryID)
+	// if category.ParentID != 0 {
+	// 	parentCategory, err := getCategoryByID(q, category.ParentID)
+	// 	if err != nil {
+	// 		return category, err
+	// 	}
+	// 	category.ParentCategoryName = parentCategory.CategoryName
+	// }
+	// 	return category, err
+
+	c, ok := categoryByID[categoryID]
+	if !ok {
+		return Category{}, sql.ErrNoRows
 	}
-	return category, err
+	return c, nil
+}
+
+func getChildCategories(parent int) []int {
+	return childCategories[parent]
+}
+
+func getAllCategories() []Category {
+	return allCategories
 }
 
 func getConfigByName(name string) (string, error) {
-	config := Config{}
-	err := dbx.Get(&config, "SELECT * FROM `configs` WHERE `name` = ?", name)
-	if err == sql.ErrNoRows {
-		return "", nil
-	}
-	if err != nil {
-		log.Print(err)
-		return "", err
-	}
-	return config.Val, err
+	// config := Config{}
+	// err := dbx.Get(&config, "SELECT * FROM `configs` WHERE `name` = ?", name)
+	// if err == sql.ErrNoRows {
+	// 	return "", nil
+	// }
+	// if err != nil {
+	// 	log.Print(err)
+	// 	return "", err
+	// }
+	// return config.Val, err
+	return config[name], nil
 }
 
 func getPaymentServiceURL() string {
@@ -470,26 +535,33 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = dbx.Exec(
-		"INSERT INTO `configs` (`name`, `val`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `val` = VALUES(`val`)",
-		"payment_service_url",
-		ri.PaymentServiceURL,
-	)
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	_, err = dbx.Exec(
-		"INSERT INTO `configs` (`name`, `val`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `val` = VALUES(`val`)",
-		"shipment_service_url",
-		ri.ShipmentServiceURL,
-	)
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
-	}
+	// _, err = dbx.Exec(
+	// 	"INSERT INTO `configs` (`name`, `val`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `val` = VALUES(`val`)",
+	// 	"payment_service_url",
+	// 	ri.PaymentServiceURL,
+	// )
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 	return
+	// }
+	// _, err = dbx.Exec(
+	// 	"INSERT INTO `configs` (`name`, `val`) VALUES (?, ?) ON DUPLICATE KEY UPDATE `val` = VALUES(`val`)",
+	// 	"shipment_service_url",
+	// 	ri.ShipmentServiceURL,
+	// )
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 	return
+	// }
+
+	// config
+	config["payment_service_url"] = ri.PaymentServiceURL
+	config["shipment_service_url"] = ri.ShipmentServiceURL
+
+	// category
+	loadCategories()
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
@@ -612,13 +684,14 @@ func getNewCategoryItems(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var categoryIDs []int
-	err = dbx.Select(&categoryIDs, "SELECT id FROM `categories` WHERE parent_id=?", rootCategory.ID)
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
-	}
+	// var categoryIDs []int
+	// err = dbx.Select(&categoryIDs, "SELECT id FROM `categories` WHERE parent_id=?", rootCategory.ID)
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 	return
+	// }
+	categoryIDs := getChildCategories(rootCategory.ID)
 
 	query := r.URL.Query()
 	itemIDStr := query.Get("item_id")
@@ -894,8 +967,14 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// 1st page
 		err := tx.Select(&items,
-			"SELECT * FROM `items` WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			// "SELECT * FROM `items` WHERE (`seller_id` = ? OR `buyer_id` = ?) AND `status` IN (?,?,?,?,?) ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
+			"SELECT * FROM (SELECT * FROM `items` WHERE `seller_id` = ? AND `status` IN (?,?,?,?,?) UNION SELECT * FROM `items` WHERE `buyer_id` = ? AND `status` IN (?,?,?,?,?)) t ORDER BY `created_at` DESC, `id` DESC LIMIT ?",
 			user.ID,
+			ItemStatusOnSale,
+			ItemStatusTrading,
+			ItemStatusSoldOut,
+			ItemStatusCancel,
+			ItemStatusStop,
 			user.ID,
 			ItemStatusOnSale,
 			ItemStatusTrading,
@@ -912,7 +991,8 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	itemDetails := []ItemDetail{}
+	itemDetails := []*ItemDetail{}
+	wg := sync.WaitGroup{}
 	for _, item := range items {
 		seller, err := getUserSimpleByID(tx, item.SellerID)
 		if err != nil {
@@ -927,7 +1007,7 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		itemDetail := ItemDetail{
+		itemDetail := &ItemDetail{
 			ID:       item.ID,
 			SellerID: item.SellerID,
 			Seller:   &seller,
@@ -981,23 +1061,40 @@ func getTransactions(w http.ResponseWriter, r *http.Request) {
 				tx.Rollback()
 				return
 			}
-			ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
-				ReserveID: shipping.ReserveID,
-			})
-			if err != nil {
-				log.Print(err)
-				outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
-				tx.Rollback()
-				return
-			}
+			// ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+			// 	ReserveID: shipping.ReserveID,
+			// })
+			// if err != nil {
+			// 	log.Print(err)
+			// 	outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+			// 	tx.Rollback()
+			// 	return
+			// }
 
 			itemDetail.TransactionEvidenceID = transactionEvidence.ID
 			itemDetail.TransactionEvidenceStatus = transactionEvidence.Status
-			itemDetail.ShippingStatus = ssr.Status
+			// itemDetail.ShippingStatus = ssr.Status
+
+			wg.Add(1)
+			go func() {
+				ssr, err := APIShipmentStatus(getShipmentServiceURL(), &APIShipmentStatusReq{
+					ReserveID: shipping.ReserveID,
+				})
+				if err != nil {
+					log.Print(err)
+					outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+					return
+				}
+
+				itemDetail.ShippingStatus = ssr.Status
+				wg.Done()
+			}()
 		}
 
 		itemDetails = append(itemDetails, itemDetail)
 	}
+
+	wg.Wait()
 	tx.Commit()
 
 	hasNext := false
@@ -1381,30 +1478,57 @@ func postBuy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
-		ToAddress:   buyer.Address,
-		ToName:      buyer.AccountName,
-		FromAddress: seller.Address,
-		FromName:    seller.AccountName,
-	})
-	if err != nil {
-		log.Print(err)
+	// scr, err := APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
+	// 	ToAddress:   buyer.Address,
+	// 	ToName:      buyer.AccountName,
+	// 	FromAddress: seller.Address,
+	// 	FromName:    seller.AccountName,
+	// })
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
+	// 	tx.Rollback()
+
+	// 	return
+	// }
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	var scr *APIShipmentCreateRes
+	var scrErr error
+	go func() {
+		defer wg.Done()
+		scr, scrErr = APIShipmentCreate(getShipmentServiceURL(), &APIShipmentCreateReq{
+			ToAddress:   buyer.Address,
+			ToName:      buyer.AccountName,
+			FromAddress: seller.Address,
+			FromName:    seller.AccountName,
+		})
+	}()
+
+	var pstr *APIPaymentServiceTokenRes
+	var payErr error
+	go func() {
+		defer wg.Done()
+		pstr, payErr = APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
+			ShopID: PaymentServiceIsucariShopID,
+			Token:  rb.Token,
+			APIKey: PaymentServiceIsucariAPIKey,
+			Price:  targetItem.Price,
+		})
+	}()
+
+	wg.Wait()
+	if scrErr != nil {
+		log.Print(scrErr)
 		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to shipment service")
 		tx.Rollback()
-
 		return
 	}
-
-	pstr, err := APIPaymentToken(getPaymentServiceURL(), &APIPaymentServiceTokenReq{
-		ShopID: PaymentServiceIsucariShopID,
-		Token:  rb.Token,
-		APIKey: PaymentServiceIsucariAPIKey,
-		Price:  targetItem.Price,
-	})
-	if err != nil {
-		log.Print(err)
-
-		outputErrorMsg(w, http.StatusInternalServerError, "payment service is failed")
+	if payErr != nil {
+		log.Print(payErr)
+		outputErrorMsg(w, http.StatusInternalServerError, "failed to request to payment service")
 		tx.Rollback()
 		return
 	}
@@ -2152,15 +2276,16 @@ func getSettings(w http.ResponseWriter, r *http.Request) {
 
 	ress.PaymentServiceURL = getPaymentServiceURL()
 
-	categories := []Category{}
+	// categories := []Category{}
 
-	err := dbx.Select(&categories, "SELECT * FROM `categories`")
-	if err != nil {
-		log.Print(err)
-		outputErrorMsg(w, http.StatusInternalServerError, "db error")
-		return
-	}
-	ress.Categories = categories
+	// err := dbx.Select(&categories, "SELECT * FROM `categories`")
+	// if err != nil {
+	// 	log.Print(err)
+	// 	outputErrorMsg(w, http.StatusInternalServerError, "db error")
+	// 	return
+	// }
+	// ress.Categories = categories
+	ress.Categories = getAllCategories()
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(ress)
