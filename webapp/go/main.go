@@ -328,7 +328,8 @@ func main() {
 
 	host := os.Getenv("MYSQL_HOST")
 	if host == "" {
-		host = "127.0.0.1"
+		// host = "127.0.0.1"
+		host = "192.168.1.21"
 	}
 	port := os.Getenv("MYSQL_PORT")
 	if port == "" {
@@ -426,11 +427,20 @@ func getCSRFToken(r *http.Request) string {
 	return csrfToken.(string)
 }
 
+
+var (
+	userMap    = make(map[int64]*User)
+)
+
 func getUser(r *http.Request) (user User, errCode int, errMsg string) {
 	session := getSession(r)
 	userID, ok := session.Values["user_id"]
 	if !ok {
 		return user, http.StatusNotFound, "no session"
+	}
+
+	if val, ok := userMap[userID.(int64)]; ok {
+		return *val, http.StatusOK, ""
 	}
 
 	err := dbx.Get(&user, "SELECT * FROM `users` WHERE `id` = ?", userID)
@@ -442,15 +452,27 @@ func getUser(r *http.Request) (user User, errCode int, errMsg string) {
 		return user, http.StatusInternalServerError, "db error"
 	}
 
+	userMap[userID.(int64)] = &user
+
 	return user, http.StatusOK, ""
 }
 
 func getUserSimpleByID(q sqlx.Queryer, userID int64) (userSimple UserSimple, err error) {
 	user := User{}
+
+	if val, ok := userMap[userID]; ok {
+		userSimple.ID = val.ID
+		userSimple.AccountName = val.AccountName
+		userSimple.NumSellItems = val.NumSellItems
+		return userSimple, err
+	}
+
 	err = sqlx.Get(q, &user, "SELECT * FROM `users` WHERE `id` = ?", userID)
 	if err != nil {
 		return userSimple, err
 	}
+	userMap[user.ID] = &user
+
 	userSimple.ID = user.ID
 	userSimple.AccountName = user.AccountName
 	userSimple.NumSellItems = user.NumSellItems
@@ -565,7 +587,7 @@ func postInitialize(w http.ResponseWriter, r *http.Request) {
 
 	res := resInitialize{
 		// キャンペーン実施時には還元率の設定を返す。詳しくはマニュアルを参照のこと。
-		Campaign: 0,
+		Campaign: 4,
 		// 実装言語を返す
 		Language: "Go",
 	}
@@ -2144,6 +2166,9 @@ func postSell(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	tx.Commit()
+
+	userMap[seller.ID].LastBump = now
+	userMap[seller.ID].NumSellItems++
 
 	w.Header().Set("Content-Type", "application/json;charset=utf-8")
 	json.NewEncoder(w).Encode(resSell{ID: itemID})
